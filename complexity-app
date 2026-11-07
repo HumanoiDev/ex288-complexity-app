@@ -1,0 +1,194 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  labels:
+    app: complexity
+data:
+  APP_TITLE: "EX288 Complex Demo"
+  APP_MESSAGE: "Application avec ConfigMap, Secret et PVC"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: complexity-settings
+  labels:
+    app: complexity
+data:
+  LOG_LEVEL: "info"
+  APP_ENV: "production"
+  FEATURE_FLAG: "enabled"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: web-secret
+  labels:
+    app: complexity
+type: Opaque
+stringData:
+  username: admin
+  password: redhat123
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-pvc
+  labels:
+    app: complexity
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: complexity
+  labels:
+    app: complexity
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: docker.io/nginxinc/nginx-unprivileged:latest
+      importPolicy:
+        scheduled: false
+      referencePolicy:
+        type: Local
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: complexity
+  labels:
+    app: complexity
+  annotations:
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"complexity:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"web\")].image"}]
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: complexity
+  template:
+    metadata:
+      labels:
+        app: complexity
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: complexity
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: web
+          image: complexity:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: complexity-settings
+          env:
+            - name: APP_TITLE
+              valueFrom:
+                configMapKeyRef:
+                  name: web-config
+                  key: APP_TITLE
+            - name: APP_MESSAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: web-config
+                  key: APP_MESSAGE
+            - name: APP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: web-secret
+                  key: username
+            - name: APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: web-secret
+                  key: password
+          volumeMounts:
+            - mountPath: /usr/share/nginx/html/data
+              name: app-storage
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+      volumes:
+        - name: app-storage
+          persistentVolumeClaim:
+            claimName: web-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: complexity-service
+  labels:
+    app: complexity
+spec:
+  selector:
+    app: complexity
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: complexity-internal
+  labels:
+    app: complexity
+spec:
+  type: ClusterIP
+  selector:
+    app: complexity
+  ports:
+    - name: http-internal
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: complexity-route
+  labels:
+    app: complexity
+spec:
+  to:
+    kind: Service
+    name: complexity-service
